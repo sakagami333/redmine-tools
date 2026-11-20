@@ -261,6 +261,8 @@ def read_xlsx_table(path, sheet_name=None):
 
 def read_rows(path, sheet_name=None):
     """CSV または Excel を読み、チケットの行(列名 → 値)のリストを返す"""
+    if not os.path.isfile(path):
+        raise SystemExit(f"ファイル「{path}」が見つかりません(ファイル名と、今いるフォルダを確認してください)")
     if path.lower().endswith((".xlsx", ".xlsm")):
         table, kind = read_xlsx_table(path, sheet_name), "Excel"
     else:
@@ -405,6 +407,9 @@ def build_plan(rows, resolver, rm, use_prefix):
         key, line = row["key"], row["_line"]
         if not key:
             err(line, "行IDが空欄です")
+            continue
+        if key == CLEAR_WORD:
+            err(line, f"行IDに「{CLEAR_WORD}」は使えません(「空にする」の記号と紛らわしいため)")
             continue
         if key.isdigit():
             err(line, f"行ID「{key}」は数字だけです。既存のチケットを更新するなら「#{key}」、"

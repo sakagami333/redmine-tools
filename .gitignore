@@ -1,6 +1,18 @@
 # 実行の記録(作成・更新したチケット番号の対応表)
+# logs/ の中身は登録しない。フォルダを残すための .gitkeep だけ登録する
+**/logs/*
+!**/logs/.gitkeep
+# 以前の保存先・ファイル名
 results/
 *.result-*.csv
+
+# 作業用のファイル(実際のチケットの情報を含むため、公開リポジトリに登録しない)
+bulk-create/work/*
+!bulk-create/work/.gitkeep
+# 念のため:bulk-create/ の直下に置いた入力・書き出しのファイルも登録しない
+# (配布用のひな形は templates/ に置く)
+bulk-create/*.xlsx
+bulk-create/*.csv
 
 # APIキーを誤って置いた場合に備えて
 .redmine_api_key

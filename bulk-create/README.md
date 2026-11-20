@@ -23,6 +23,25 @@ cd ~/redmine-tools/bulk-create
 
 新しい版を取り込むときは、`cd ~/redmine-tools && git pull` を実行します。
 
+### フォルダの使い分け
+
+```
+bulk-create/
+├── redmine_bulk_create.py   ツール本体
+├── templates/               配布用のひな形(Git で管理する)
+│   ├── sample_tickets.xlsx
+│   └── sample_tickets.csv
+├── work/                    自分の作業用のファイル(Git で管理しない)
+│   ├── 2027-1月分.xlsx          ← templates/ からコピーして書いたもの
+│   ├── export-64-20261120.xlsx  ← 書き出したもの
+│   └── logs/                    ← work/ のファイルを反映したときの記録
+└── logs/                    bulk-create/ 直下のファイルを反映したときの記録
+```
+
+- **実際のチケットを書いたファイルは、`work/` に置いてください。** このリポジトリは公開しているため、`work/` の中身と、`bulk-create/` 直下の `.xlsx`・`.csv` は、Git に登録しない設定(`.gitignore`)にしてあります。
+- **実行の記録**は、入力ファイルの隣の `logs/` に保存されます(`work/` のファイルなら `work/logs/`)。どの階層の `logs/` も、中身は Git に登録しません。
+- `templates/` に置いたファイルは Git で管理され、Push すると公開されます。社内の情報を含まない、ひな形だけを置いてください。
+
 ### APIキーを保存する
 
 1. Redmineの右上のユーザーメニュー →「個人設定」を開く
@@ -40,7 +59,13 @@ chmod 600 ~/.redmine_api_key
 
 ### Excelで書く(おすすめ)
 
-`sample_tickets.xlsx` をコピーして使います。
+`templates/sample_tickets.xlsx` を `work/` にコピーして使います。
+
+```bash
+cd ~/redmine-tools/bulk-create
+cp templates/sample_tickets.xlsx work/2027-1月分.xlsx
+```
+
 
 - **「チケット」シート**:1行1チケットで入力します。2〜8行目は入力例なので、書き換えるか削除してください。
 - **「使い方」シート**:作成・更新のルールと、各列の書き方をまとめてあります。
@@ -143,7 +168,7 @@ T9,#454,タスク,追加タスク,,2027-01-20,
 
 ```bash
 cd ~/redmine-tools/bulk-create
-python3 redmine_bulk_create.py sample_tickets.xlsx --project my-project
+python3 redmine_bulk_create.py work/2027-1月分.xlsx --project my-project
 ```
 
 - `--project` には、プロジェクトの識別子(URLの `/projects/〇〇` の〇〇)を書きます。
@@ -172,7 +197,7 @@ python3 redmine_bulk_create.py sample_tickets.xlsx --project my-project
 試し実行の内容に問題がなければ、`--apply` を付けて実行します。
 
 ```bash
-python3 redmine_bulk_create.py sample_tickets.xlsx --project my-project --apply
+python3 redmine_bulk_create.py work/2027-1月分.xlsx --project my-project --apply
 ```
 
 `--apply` を付けたときも、まず試し実行と同じ一覧とチェック結果が表示され、次のように確認されます。`y` を入力すると反映が始まり、それ以外(Enter だけなど)なら、何も反映せずに終わります。
@@ -183,18 +208,18 @@ python3 redmine_bulk_create.py sample_tickets.xlsx --project my-project --apply
 
 確認を省略したいとき(決まったファイルを繰り返し反映するときなど)は、`--yes` も付けます。
 
-結果は、画面に表示されるとともに、**実行の記録**として、入力ファイルと同じ場所の `results/` フォルダに `入力ファイル名-日時.csv` で保存されます(行ID・処理・チケット番号の対応表)。フォルダがなければ自動で作ります。
+結果は、画面に表示されるとともに、**実行の記録**として、入力ファイルの隣の `logs/` フォルダに `入力ファイル名-日時.csv` で保存されます(行ID・処理・チケット番号の対応表)。フォルダがなければ自動で作ります。
 
 ```
-bulk-create/
+work/
 ├── export-482-20261120.xlsx        ← 作業用のファイル
-└── results/
+└── logs/
     └── export-482-20261120-20261120-224309.csv   ← 22時43分09秒に反映したときの記録
 ```
 
 - 記録ができるのは、`--apply` で実際に反映したときだけです(試し実行・書き出し・確認で中止したときは作りません)。
 - 保存先を変えるときは `--log-dir フォルダ` を付けます。
-- `results/` は、リポジトリに登録しない設定(`.gitignore`)にしてあります。
+- `logs/` の中身は、リポジトリに登録しない設定(`.gitignore`)にしてあります。
 
 ### 更新が反映されなかった項目の警告
 
@@ -230,7 +255,7 @@ python3 redmine_bulk_create.py --export 64 --project my-project
 ```
 
 - #64 と、その下の作業区分・タスクなどが、すべて書き出されます。複数のときは `--export 64,380` のように並べます。
-- 書き出し先は、既定で `export-64-日付.xlsx` です。`--out ファイル名` で変えられます(`.csv` にすればCSVで書き出します)。同じ名前のファイルがあるときは、上書きせずに止まります。
+- 書き出し先は、既定で `work/export-64-日付.xlsx` です(どのフォルダで実行しても、ツールと同じ場所の `work/` に保存します)。`--out ファイル名` で変えられます(`.csv` にすればCSVで書き出します)。同じ名前のファイルがあるときは、上書きせずに止まります。
 - 終了したチケットを除くときは、`--exclude-closed` を付けます。
 - `--project` と違うプロジェクトのチケット(サブプロジェクトなど)は、書き出しません(画面に表示します)。
 
@@ -246,7 +271,7 @@ python3 redmine_bulk_create.py --export 64 --project my-project
 2. 試し実行で確認します。
 
 ```bash
-python3 redmine_bulk_create.py export-64-20261120.xlsx --project my-project
+python3 redmine_bulk_create.py work/export-64-20261120.xlsx --project my-project
 ```
 
 **直したところだけ**が「変更前 → 変更後」として表示され、触っていない行は「(変更なし)」になります。Excelを通すと変わりやすい改行コードや末尾の空白の違いは、変更として扱いません。
@@ -256,7 +281,7 @@ python3 redmine_bulk_create.py export-64-20261120.xlsx --project my-project
 ## 5. 途中で失敗したとき
 
 - 反映中にエラーが起きると、**その時点で止まります**。それより前の行は反映済みです。
-- 反映済みのものは、実行の記録(`results/` の `入力ファイル名-日時.csv`)に残っています。
+- 反映済みのものは、実行の記録(`logs/` の `入力ファイル名-日時.csv`)に残っています。
 - 続きから行うときは、入力ファイルから反映済みの行を削除し、作成済みの親は `#番号` に書き換えてから、もう一度実行してください。
 
 ## 補足
@@ -289,9 +314,9 @@ python3 redmine_bulk_create.py --export <番号> --project <識別子> [オプ�
 | `--apply` | 読み込み | 実際に反映する。付けなければ試し実行(何も反映しない) |
 | `--yes`, `-y` | 読み込み | `--apply` のとき、反映前の確認(`[y/N]`)を省略する |
 | `--no-prefix` | 読み込み | 新しく作るチケットの題名の頭に、親の題名を付けない |
-| `--log-dir <フォルダ>` | 読み込み | 実行の記録の保存先。既定は、入力ファイルと同じ場所の `results/` |
+| `--log-dir <フォルダ>` | 読み込み | 実行の記録の保存先。既定は、入力ファイルの隣の `logs/` |
 | `--export <番号>` | 書き出し | 指定したチケットと、その下の階層をすべて書き出す。`64`・`#64`・`64,380` の形で指定 |
-| `--out <ファイル>` | 書き出し | 書き出し先。`.csv` ならCSV、それ以外は Excel。既定は `export-番号-日付.xlsx` |
+| `--out <ファイル>` | 書き出し | 書き出し先。`.csv` ならCSV、それ以外は Excel。既定は `work/export-番号-日付.xlsx` |
 | `--exclude-closed` | 書き出し | 終了したチケットを書き出さない |
 | `--help`, `-h` | 両方 | 使い方を表示する |
 
@@ -302,22 +327,22 @@ python3 redmine_bulk_create.py --export <番号> --project <識別子> [オプ�
 
 ```bash
 # 試し実行(作成・更新の予定と、入力の間違いを表示するだけ)
-python3 redmine_bulk_create.py tickets.xlsx -p my-project
+python3 redmine_bulk_create.py work/tickets.xlsx -p my-project
 
 # 反映(予定を表示 → y で確認 → 作成・更新)
-python3 redmine_bulk_create.py tickets.xlsx -p my-project --apply
+python3 redmine_bulk_create.py work/tickets.xlsx -p my-project --apply
 
 # 確認なしで反映
-python3 redmine_bulk_create.py tickets.xlsx -p my-project --apply --yes
+python3 redmine_bulk_create.py work/tickets.xlsx -p my-project --apply --yes
 
 # 試験用など、別の Redmine に向ける
-python3 redmine_bulk_create.py tickets.xlsx -p my-project --url http://localhost:3001
+python3 redmine_bulk_create.py work/tickets.xlsx -p my-project --url http://localhost:3001
 
 # 既存のチケット #64 と、その下をすべて書き出す
 python3 redmine_bulk_create.py --export 64 -p my-project
 
 # 複数のチケットを、終了したものを除いて CSV に書き出す
-python3 redmine_bulk_create.py --export 64,380 -p my-project --exclude-closed --out open.csv
+python3 redmine_bulk_create.py --export 64,380 -p my-project --exclude-closed --out work/open.csv
 ```
 
 ### 行IDのルール
@@ -357,4 +382,4 @@ python3 redmine_bulk_create.py --export 64,380 -p my-project --exclude-closed --
 | `REDMINE_API_KEY` | APIキー。設定されていれば、`~/.redmine_api_key` より優先する |
 | `~/.redmine_api_key` | APIキーを書いたファイル(`chmod 600` にしておく) |
 | `REDMINE_URL` | 接続先の既定値。`--url` を付けたときは、そちらが優先される |
-| `results/入力ファイル名-日時.csv` | 実行の記録(行ID・処理・チケット番号・題名・URL・注意)。`--apply` で反映したときに、入力ファイルと同じ場所の `results/` にできる |
+| `logs/入力ファイル名-日時.csv` | 実行の記録(行ID・処理・チケット番号・題名・URL・注意)。`--apply` で反映したときに、入力ファイルの隣の `logs/` にできる |

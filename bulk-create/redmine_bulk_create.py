@@ -52,7 +52,10 @@ DESCRIPTION_TEMPLATES = {
 }
 
 # 実行の記録(結果のCSV)を保存するフォルダ名(入力ファイルと同じ場所に作る)
-RESULT_DIR = "results"
+RESULT_DIR = "logs"
+
+# 書き出しの既定の保存先(ツールと同じ場所の work/。Git で管理しないフォルダ)
+WORK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work")
 
 # 値を「空にする」ときに書く記号(更新で期日や担当者を消すときなど)
 CLEAR_WORD = "-"
@@ -383,6 +386,12 @@ class Resolver:
 
 # 既存のチケットの書き方(行ID・親の欄で共通): #453
 EXISTING_RE = re.compile(r"#(\d+)")
+
+
+def _show_path(path):
+    """表示用のパス(今のフォルダの中なら相対パス、外なら絶対パス)"""
+    rel = os.path.relpath(path)
+    return os.path.abspath(path) if rel.startswith("..") else rel
 
 
 def _norm(text):
@@ -1101,7 +1110,18 @@ def parse_issue_ids(text):
 
 def run_export(args, rm, resolver):
     root_ids = parse_issue_ids(args.export)
-    out = args.out or f'export-{"_".join(map(str, root_ids))}-{datetime.date.today():%Y%m%d}.xlsx'
+    if args.out:
+        out = args.out
+    else:
+        # 既定は、ツールと同じ場所の work/(Git で管理しないフォルダ。実際のチケットの情報を公開しないため)
+        out = os.path.join(WORK_DIR, f'export-{"_".join(map(str, root_ids))}-{datetime.date.today():%Y%m%d}.xlsx')
+    out_dir = os.path.dirname(os.path.abspath(out))
+    if not os.path.isdir(out_dir):
+        try:
+            os.makedirs(out_dir)
+        except OSError as e:
+            raise SystemExit(f"書き出し先のフォルダ「{out_dir}」を作れません: {e}")
+    out = _show_path(out)
     if os.path.exists(out):
         raise SystemExit(f"{out} はすでにあります。上書きしないように止めました(--out で別の名前を指定してください)")
 
@@ -1124,8 +1144,9 @@ def run_export(args, rm, resolver):
         print(f"\n書き出さなかったチケット: {'、'.join(skipped)}")
     extra = f" --url {args.url.rstrip('/')}" if args.url.rstrip("/") != DEFAULT_URL.rstrip("/") else ""
     print("\n直したら、次のように試し実行してから反映してください(変えた項目だけが更新されます):")
-    print(f"  python3 {os.path.basename(sys.argv[0])} {out} --project {args.project}{extra}")
-    print(f"  python3 {os.path.basename(sys.argv[0])} {out} --project {args.project}{extra} --apply")
+    tool = _show_path(sys.argv[0])
+    print(f"  python3 {tool} {out} --project {args.project}{extra}")
+    print(f"  python3 {tool} {out} --project {args.project}{extra} --apply")
 
 
 # ============================================================
@@ -1160,7 +1181,7 @@ def main():
     ap.add_argument("--export", metavar="番号",
                     help="指定したチケットと、その下の階層をすべて書き出す(例: --export 64 / --export 64,380)")
     ap.add_argument("--out", metavar="ファイル",
-                    help="書き出し先(.xlsx または .csv。既定: export-番号-日付.xlsx)")
+                    help="書き出し先(.xlsx または .csv。既定: ツールと同じ場所の work/export-番号-日付.xlsx)")
     ap.add_argument("--exclude-closed", action="store_true", help="書き出すときに、終了したチケットを除く")
     ap.add_argument("--no-prefix", action="store_true", help="題名の頭に親の題名を付けない")
     ap.add_argument("--log-dir", metavar="フォルダ",
@@ -1244,7 +1265,7 @@ def main():
             print("中止しました(何も反映していません)。")
             return
 
-    # 実行の記録は、入力ファイルと同じ場所の results/ に残す(--log-dir で変更可)
+    # 実行の記録は、入力ファイルと同じ場所の logs/ に残す(--log-dir で変更可)
     log_dir = args.log_dir or os.path.join(os.path.dirname(os.path.abspath(args.csv)), RESULT_DIR)
     try:
         os.makedirs(log_dir, exist_ok=True)
@@ -1261,7 +1282,7 @@ def main():
     log_rows, ok, warn_count = apply_plan(plan, rm, base_url, log_path)
     done_create = sum(1 for r in log_rows if r[1] == "作成")
     done_update = sum(1 for r in log_rows if r[1] == "更新")
-    print(f"\n新規作成 {done_create}件、更新 {done_update}件を反映しました。結果: {os.path.relpath(log_path)}")
+    print(f"\n新規作成 {done_create}件、更新 {done_update}件を反映しました。結果: {_show_path(log_path)}")
     if warn_count:
         print(f"!! {warn_count}件で、指定どおりに変わらなかった項目があります。上の「!!」の行を確認してください。")
     if not ok:

@@ -2,15 +2,17 @@
 """
 Redmine チケット一括作成ツール
 
-CSV に書いたチケット(親子孫の階層つき)を、Redmine の REST API で作成する。
+CSV または Excel(.xlsx)に書いたチケット(親子孫の階層つき)を、
+Redmine の REST API で作成する。
 標準ライブラリだけで動くので、pip でのインストールは不要。
 
 使い方:
   # 試し実行(作成はしない。内容のチェックと、作成予定の一覧を表示)
   python3 redmine_bulk_create.py tickets.csv --project my-project
+  python3 redmine_bulk_create.py tickets.xlsx --project my-project
 
   # 本番実行(実際に作成する)
-  python3 redmine_bulk_create.py tickets.csv --project my-project --apply
+  python3 redmine_bulk_create.py tickets.xlsx --project my-project --apply
 
 APIキー:
   環境変数 REDMINE_API_KEY、または ~/.redmine_api_key ファイルに書いておく。
@@ -105,11 +107,15 @@ class Redmine:
 
 
 # ============================================================
-# CSV の読み込み
+# ファイルの読み込み(CSV / Excel)
 # ============================================================
 
-def read_csv(path):
-    """UTF-8(BOM付き含む)と Shift_JIS(Excel の標準)の両方に対応"""
+# Excel の既定のシート名。このシートがあれば優先して読む(なければ先頭のシート)
+DEFAULT_SHEET = "チケット"
+
+
+def read_csv_table(path):
+    """CSV を読み、表(行のリスト)を返す。UTF-8(BOM付き含む)と Shift_JIS に対応"""
     raw = open(path, "rb").read()
     for enc in ("utf-8-sig", "cp932"):
         try:
@@ -119,26 +125,151 @@ def read_csv(path):
             continue
     else:
         raise SystemExit("CSV の文字コードを判別できません(UTF-8 か Shift_JIS で保存してください)")
+    return list(csv.reader(text.splitlines()))
 
-    reader = csv.DictReader(text.splitlines())
+
+# --- Excel(.xlsx)----------------------------------------------
+# 追加のインストールなしで動かすため、標準ライブラリだけで .xlsx を読む。
+# (.xlsx の中身は、XML ファイルを zip でまとめたもの)
+
+_NS = {
+    "m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+}
+
+# 日付として扱う Excel 標準の表示形式の番号(日本語版の「yyyy年m月d日」などを含む)
+_DATE_FORMAT_IDS = set(range(14, 23)) | set(range(27, 37)) | {45, 46, 47} | set(range(50, 59))
+
+
+def _is_date_format(code):
+    """独自の表示形式が日付かどうか(引用符や [] の中を除いて y/m/d を含むか)"""
+    code = re.sub(r'"[^"]*"|\[[^\]]*\]|\\.', "", code or "")
+    return bool(re.search(r"[ymd]", code, re.IGNORECASE)) and "General" not in code
+
+
+def _col_index(ref):
+    """セル番地(例: "C12")から、0始まりの列番号を返す"""
+    n = 0
+    for ch in re.match(r"[A-Z]+", ref).group():
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def read_xlsx_table(path, sheet_name=None):
+    """Excel を読み、表(行のリスト)を返す。日付のセルは YYYY-MM-DD の文字列にする"""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    try:
+        zf = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        raise SystemExit("Excel ファイルを開けません(.xlsx 形式で保存してください。古い .xls は非対応です)")
+
+    def xml(name):
+        return ET.fromstring(zf.read(name))
+
+    # シートの一覧と、ファイル内の場所
+    wb = xml("xl/workbook.xml")
+    rels = {r.get("Id"): r.get("Target") for r in xml("xl/_rels/workbook.xml.rels").findall("rel:Relationship", _NS)}
+    sheets = [(s.get("name"), rels[s.get("{%s}id" % _NS["r"])]) for s in wb.find("m:sheets", _NS)]
+    names = [n for n, _ in sheets]
+    if sheet_name:
+        if sheet_name not in names:
+            raise SystemExit(f"シート「{sheet_name}」がありません。あるシート: {'、'.join(names)}")
+        target = dict(sheets)[sheet_name]
+    else:
+        target = dict(sheets).get(DEFAULT_SHEET, sheets[0][1])
+    target = target.lstrip("/")
+    if not target.startswith("xl/"):
+        target = "xl/" + target
+
+    pr = wb.find("m:workbookPr", _NS)
+    epoch = datetime.date(1904, 1, 1) if pr is not None and pr.get("date1904") in ("1", "true") else datetime.date(1899, 12, 30)
+
+    # 共有文字列(セルの文字は、ここにまとめて保存されている)
+    shared = []
+    if "xl/sharedStrings.xml" in zf.namelist():
+        for si in xml("xl/sharedStrings.xml").findall("m:si", _NS):
+            shared.append("".join(t.text or "" for t in si.iter("{%s}t" % _NS["m"])))
+
+    # 表示形式(日付のセルを見分けるため)
+    date_styles = set()
+    if "xl/styles.xml" in zf.namelist():
+        st = xml("xl/styles.xml")
+        custom = {}
+        fmts = st.find("m:numFmts", _NS)
+        if fmts is not None:
+            custom = {int(f.get("numFmtId")): f.get("formatCode") for f in fmts}
+        xfs = st.find("m:cellXfs", _NS)
+        if xfs is not None:
+            for i, xf in enumerate(xfs):
+                fid = int(xf.get("numFmtId", 0))
+                if fid in _DATE_FORMAT_IDS or (fid in custom and _is_date_format(custom[fid])):
+                    date_styles.add(i)
+
+    table = {}
+    for row in xml(target).iter("{%s}row" % _NS["m"]):
+        r = int(row.get("r")) - 1
+        for c in row.findall("m:c", _NS):
+            typ, style = c.get("t"), int(c.get("s", 0))
+            v = c.find("m:v", _NS)
+            raw = v.text if v is not None else None
+            if typ == "s":
+                val = shared[int(raw)] if raw is not None else ""
+            elif typ == "inlineStr":
+                val = "".join(t.text or "" for t in c.iter("{%s}t" % _NS["m"]))
+            elif typ in ("str", "e"):
+                val = raw or ""
+            elif typ == "b":
+                val = "TRUE" if raw == "1" else "FALSE"
+            elif typ == "d":
+                val = (raw or "")[:10]
+            elif raw is None:
+                val = ""
+            else:
+                num = float(raw)
+                if style in date_styles:
+                    val = (epoch + datetime.timedelta(days=int(num))).isoformat()
+                elif num.is_integer():
+                    val = str(int(num))
+                else:
+                    val = str(num)
+            table.setdefault(r, {})[_col_index(c.get("r"))] = val
+
+    if not table:
+        return []
+    width = max(max(cols) for cols in table.values()) + 1
+    return [[table.get(r, {}).get(c, "") for c in range(width)] for r in range(max(table) + 1)]
+
+
+def read_rows(path, sheet_name=None):
+    """CSV または Excel を読み、チケットの行(列名 → 値)のリストを返す"""
+    if path.lower().endswith((".xlsx", ".xlsm")):
+        table, kind = read_xlsx_table(path, sheet_name), "Excel"
+    else:
+        table, kind = read_csv_table(path), "CSV"
+    if not table:
+        return []
+
     header_map = {}
-    for name in reader.fieldnames or []:
-        clean = name.strip()
+    for idx, name in enumerate(table[0]):
+        clean = (name or "").strip()
         for key, aliases in COLUMN_ALIASES.items():
             if clean in aliases:
-                header_map[name] = key
+                header_map[idx] = key
     missing = [k for k in REQUIRED_COLUMNS if k not in header_map.values()]
     if missing:
         names = ", ".join(COLUMN_ALIASES[k][0] for k in missing)
-        raise SystemExit(f"CSV に必須の列がありません: {names}")
+        raise SystemExit(f"{kind} の1行目(見出し)に、必須の列がありません: {names}")
 
     rows = []
-    for line_no, rec in enumerate(reader, start=2):
-        row = {key: (rec.get(src) or "").strip() for src, key in header_map.items()}
+    for line_no, rec in enumerate(table[1:], start=2):
+        row = {key: (rec[idx] if idx < len(rec) else "").strip() for idx, key in header_map.items()}
         if not any(row.values()):
             continue  # 空行は無視
         if row.get("key", "").startswith("#") and not row.get("tracker"):
-            continue  # 「#」で始まるコメント行は無視
+            continue  # 「#」で始まるメモ行は無視
         row["_line"] = line_no
         rows.append(row)
     return rows
@@ -227,7 +358,7 @@ class Resolver:
 # ============================================================
 
 def build_plan(rows, resolver, rm, use_prefix):
-    """CSV の行を検証し、親から順に並べた作成計画を返す。エラーはまとめて返す"""
+    """ファイルの行を検証し、親から順に並べた作成計画を返す。エラーはまとめて返す"""
     errors = []
     by_key = {}
     for row in rows:
@@ -256,7 +387,7 @@ def build_plan(rows, resolver, rm, use_prefix):
                     errors.append(f'{row["_line"]}行目: 親チケット #{num} を取得できません({e})')
                     existing[num] = None
         elif p not in by_key:
-            errors.append(f'{row["_line"]}行目: 親「{p}」がCSVの中に見つかりません')
+            errors.append(f'{row["_line"]}行目: 親「{p}」がファイルの中に見つかりません')
 
     # 親から順に並べる(循環のチェックつき)
     order, state = [], {}
@@ -416,7 +547,7 @@ def apply_plan(plan, rm, base_url, log_path):
             log_rows.append([item["key"], issue_id, fields["subject"], f"{base_url}/issues/{issue_id}"])
             print(f'  作成: #{issue_id}  [{item["key"]}] {fields["subject"]}')
     except RedmineError as e:
-        print(f'\n!! [{item["key"]}](CSV {item["line"]}行目)の作成で失敗しました: {e}', file=sys.stderr)
+        print(f'\n!! [{item["key"]}](ファイルの{item["line"]}行目)の作成で失敗しました: {e}', file=sys.stderr)
         print("   ここで処理を止めました。これより前のチケットは作成済みです。", file=sys.stderr)
         return log_rows, False
     finally:
@@ -448,17 +579,18 @@ def load_api_key():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="CSV から Redmine のチケットを親子付きで一括作成する")
-    ap.add_argument("csv", help="チケットを書いた CSV ファイル")
+    ap = argparse.ArgumentParser(description="CSV / Excel から Redmine のチケットを親子付きで一括作成する")
+    ap.add_argument("csv", metavar="ファイル", help="チケットを書いた CSV または Excel(.xlsx)ファイル")
     ap.add_argument("--project", "-p", required=True, help="プロジェクトの識別子(例: my-project)")
+    ap.add_argument("--sheet", help=f"Excel のシート名(既定: 「{DEFAULT_SHEET}」シート、なければ先頭のシート)")
     ap.add_argument("--apply", action="store_true", help="実際に作成する(付けなければ試し実行)")
     ap.add_argument("--no-prefix", action="store_true", help="題名の頭に親の題名を付けない")
     ap.add_argument("--url", default=DEFAULT_URL, help=f"Redmine の URL(既定: {DEFAULT_URL})")
     args = ap.parse_args()
 
-    rows = read_csv(args.csv)
+    rows = read_rows(args.csv, args.sheet)
     if not rows:
-        raise SystemExit("CSV にチケットがありません")
+        raise SystemExit("ファイルにチケットがありません")
 
     rm = Redmine(args.url, load_api_key())
     try:
@@ -473,7 +605,7 @@ def main():
     print_plan(plan)
 
     if errors:
-        print(f"\n!! CSV に {len(errors)} 件の問題があります。修正してからやり直してください。", file=sys.stderr)
+        print(f"\n!! ファイルに {len(errors)} 件の問題があります。修正してからやり直してください。", file=sys.stderr)
         for e in errors:
             print("   - " + e, file=sys.stderr)
         sys.exit(1)

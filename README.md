@@ -4,7 +4,7 @@ Redmine を便利に使うための小さな道具をまとめたリポジトリ
 
 | フォルダ | 内容 |
 |---|---|
-| [bulk-create](bulk-create/) | CSV から、親子孫の階層つきでチケットを一括作成するツール(Python 3、REST API 使用) |
+| [bulk-create](bulk-create/) | CSV / Excel から、親子孫の階層つきでチケットを一括作成するツール(Python 3、REST API 使用) |
 
 各ツールの使い方は、それぞれのフォルダの README.md を参照してください。
 

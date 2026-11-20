@@ -1,0 +1,51 @@
+# Redmine 7.0 + PostgreSQL 16 を、WSL2 内の Docker Engine で動かす構成
+#
+# このファイルと同じフォルダに用意するもの:
+#   .env                        POSTGRES_PASSWORD と SECRET_KEY_BASE(.env.example を参照)
+#   plugins/                    使うプラグイン
+#   config/configuration.yml    SMTP 設定など(移行元の Redmine からコピー)
+#   data/files/                 添付ファイル(移行元の Redmine の files/ をコピー)
+
+services:
+  redmine:
+    build: .
+    image: redmine-local:7.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"   # この PC からのみアクセス可
+    environment:
+      REDMINE_DB_POSTGRES: db
+      REDMINE_DB_DATABASE: redmine
+      REDMINE_DB_USERNAME: redmine
+      REDMINE_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      REDMINE_SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      REDMINE_PLUGINS_MIGRATE: "true"   # 起動時に redmine:plugins:migrate を実行
+      TZ: Asia/Tokyo
+    volumes:
+      - ./data/files:/usr/src/redmine/files
+      - ./plugins:/usr/src/redmine/plugins
+      # 読み取り専用(:ro)にしないこと。公式イメージは起動時に所有者を変更するため、
+      # :ro だと起動処理がエラーになり、再起動を繰り返す
+      - ./config/configuration.yml:/usr/src/redmine/config/configuration.yml
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: redmine
+      POSTGRES_USER: redmine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Asia/Tokyo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U redmine -d redmine"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

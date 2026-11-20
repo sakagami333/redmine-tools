@@ -1,0 +1,220 @@
+/* ==========================================================
+   Redmine 7.0 デザイン調整(View customize 用 CSS)
+
+   View customize の設定:
+     パスのパターン       :(空欄)
+     プロジェクトのパターン:(空欄)
+     挿入位置             :全ページのヘッダ
+     種別                 :CSS
+
+   ステータスの番号(status-2 など)とトラッカーの番号(tracker-1 など)は、
+   環境ごとに違う。「管理 → チケットのステータス / トラッカー」の
+   各項目のURLの末尾の数字に合わせて書き換えること。
+   ========================================================== */
+
+
+/* ---------- 全体 ---------- */
+
+body {
+  font-size: 13px;
+}
+
+hr {
+  margin: 1em 0;
+}
+
+
+/* ---------- チケット一覧 ---------- */
+
+/* 一覧のセルの枠線を消す */
+table.list tbody td,
+table.list tbody tr:hover td {
+  border: initial;
+}
+
+/* チケットのリンク色(濃い青) */
+table.list tr.issue a {
+  color: #1a4f8b;
+}
+
+/* 終了したチケットは行全体を控えめにする */
+table.list tr.issue.closed td,
+table.list tr.issue.closed a {
+  color: #8a94a6;
+}
+
+
+/* ---------- チケットの表:題名の列を広く取り、1行で省略 ---------- */
+/* (チケット一覧・子チケット・関連するチケット・マイページの表に共通) */
+
+table.list.issues th,
+table.list.issues td:not(.subject) {
+  white-space: nowrap;
+}
+
+/* 題名以外の列は、中身の幅ぴったりに縮める */
+table.list.issues td:not(.subject) {
+  width: 1%;
+}
+
+/* 題名の列は、残りの幅をすべて使い、はみ出しは「…」で省略 */
+table.list.issues td.subject {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+/* ---------- ステータスの色分け(トイカラーのチップ) ---------- */
+
+table.list tr.issue > td.status {
+  font-size: 90%;
+  text-align: center;
+  min-width: 6.5em;
+}
+
+/* チップを付けるステータス:セルの枠線はそのままに、文字の下へチップを重ねる */
+table.list tr.issue:is(.status-2, .status-34, .status-3, .status-5, .status-6) > td.status {
+  position: relative;
+  z-index: 0;
+  font-weight: bold;
+}
+
+table.list tr.issue:is(.status-2, .status-34, .status-3, .status-5, .status-6) > td.status::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  top: 50%;                       /* 行の上下中央に置く */
+  height: 1.9em;                  /* 行の高さに関係なく一定 */
+  transform: translateY(-50%);
+  border-radius: 10px;
+  background: var(--chip-color);
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.18);
+  z-index: -1;                    /* 文字の下に置く */
+}
+
+/* 進行中:青 */
+table.list tr.issue.status-2 > td.status  { --chip-color: #1565d8; color: #ffffff; }
+/* 返答待ち:黄 */
+table.list tr.issue.status-34 > td.status { --chip-color: #ffc400; color: #3d2e00; }
+/* 保留:紫 */
+table.list tr.issue.status-3 > td.status  { --chip-color: #7c3aed; color: #ffffff; }
+/* 終了:緑 */
+table.list tr.issue.status-5 > td.status  { --chip-color: #127f33; color: #ffffff; }
+/* 却下:赤 */
+table.list tr.issue.status-6 > td.status  { --chip-color: #d7263d; color: #ffffff; }
+
+
+/* ---------- コメント(履歴) ---------- */
+
+.journal {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 1em;
+}
+
+h4.note-header {
+  margin: 0;
+  padding-left: 1em;
+  border-bottom: none;
+  font-size: 90%;
+}
+
+div.journal ul.details,
+ul.revision-info {
+  color: #8a94a6;
+  margin-bottom: 0;
+  font-size: 90%;
+}
+
+div#tab-content-history > div {
+  margin-top: 2px;
+  margin-bottom: 2px;
+}
+
+
+/* ---------- Wiki(説明・コメント本文) ---------- */
+
+div.wiki {
+  font-family: "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
+}
+
+div.wiki img {
+  border: 1px solid #a9c1db;
+  border-radius: 5px;
+}
+
+
+/* ---------- 古い方式のアイコンの修正 ---------- */
+/* 7.0標準のアイコンはSVGを持つため対象外。SVGを持たない古い方式のアイコン
+   (プラグインなど)だけ、背景画像を1回だけ左端に表示する */
+.icon:not(:has(svg)) {
+  background-repeat: no-repeat;
+  background-position: 0 50%;
+  padding-left: 20px;
+}
+
+
+/* ---------- チケット詳細:親チケットとタイトルを階段状に表示 ---------- */
+
+/* 親子の階層が1段深くなるごとに、右へずらす */
+div.issue div.subject div div {
+  padding-left: 1.2em;
+}
+
+/* タイトル部分を、アイコン(回り込み)の右側で独立させる(インデントを効かせるため) */
+div.issue div.subject {
+  display: flow-root;
+}
+
+/* 親チケット(ストーリー・作業区分)の行:少し小さく */
+div.issue div.subject p {
+  font-size: 0.8em;
+  line-height: 1.5;
+  margin: 0 0 2px;
+}
+
+/* チケットのタイトル:少し大きく */
+div.issue div.subject h3 {
+  font-size: 1.6em;
+  line-height: 1.4;
+  margin: 4px 0 0;
+}
+
+
+/* ---------- チケット詳細:タイトルと親チケットの頭に、トラッカーのアイコン ---------- */
+/* Font Awesome 6(無料版)が読み込まれている前提 */
+
+div.issue div.subject h3::before,
+div.issue div.subject p a.issue::before {
+  font-family: "Font Awesome 6 Free";
+  font-weight: 900;
+  display: inline-block;
+  width: 1.25em;
+  text-align: center;
+  margin-right: 0.3em;
+  line-height: 1;
+}
+
+/* ストーリー(tracker-1):開いた本 */
+div.issue.tracker-1 div.subject h3::before,
+div.issue div.subject p a.issue.tracker-1::before {
+  content: "\f518";
+  color: #4f46e5;
+}
+
+/* 作業区分(tracker-2):枝分かれしたフォルダ */
+div.issue.tracker-2 div.subject h3::before,
+div.issue div.subject p a.issue.tracker-2::before {
+  content: "\f802";
+  color: #0d9488;
+}
+
+/* タスク(tracker-3):チェック付きの四角 */
+div.issue.tracker-3 div.subject h3::before,
+div.issue div.subject p a.issue.tracker-3::before {
+  content: "\f14a";
+  color: #475569;
+}

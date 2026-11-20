@@ -11,8 +11,11 @@ Redmine の REST API で作成する。
   python3 redmine_bulk_create.py tickets.csv --project my-project
   python3 redmine_bulk_create.py tickets.xlsx --project my-project
 
-  # 本番実行(実際に作成する)
+  # 本番実行(作成予定を表示し、y で確認してから作成する)
   python3 redmine_bulk_create.py tickets.xlsx --project my-project --apply
+
+  # 確認を省略して作成する
+  python3 redmine_bulk_create.py tickets.xlsx --project my-project --apply --yes
 
 APIキー:
   環境変数 REDMINE_API_KEY、または ~/.redmine_api_key ファイルに書いておく。
@@ -70,7 +73,9 @@ REQUIRED_COLUMNS = ["key", "tracker", "subject"]
 # ============================================================
 
 class RedmineError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status  # HTTP のステータスコード(通信できなかった場合は None)
 
 
 class Redmine:
@@ -95,7 +100,7 @@ class Redmine:
                     detail = " / ".join(errors)
             except ValueError:
                 detail = detail[:300]
-            raise RedmineError(f"{method} {path} → HTTP {e.code}: {detail}") from None
+            raise RedmineError(f"{method} {path} → HTTP {e.code}: {detail}", status=e.code) from None
         except urllib.error.URLError as e:
             raise RedmineError(f"{self.url} に接続できません: {e.reason}") from None
 
@@ -583,25 +588,40 @@ def main():
     ap.add_argument("csv", metavar="ファイル", help="チケットを書いた CSV または Excel(.xlsx)ファイル")
     ap.add_argument("--project", "-p", required=True, help="プロジェクトの識別子(例: my-project)")
     ap.add_argument("--sheet", help=f"Excel のシート名(既定: 「{DEFAULT_SHEET}」シート、なければ先頭のシート)")
-    ap.add_argument("--apply", action="store_true", help="実際に作成する(付けなければ試し実行)")
+    ap.add_argument("--apply", action="store_true",
+                    help="実際に作成する(作成予定を表示し、確認してから作成する。付けなければ試し実行)")
+    ap.add_argument("--yes", "-y", action="store_true", help="--apply のとき、作成前の確認を省略する")
     ap.add_argument("--no-prefix", action="store_true", help="題名の頭に親の題名を付けない")
     ap.add_argument("--url", default=DEFAULT_URL, help=f"Redmine の URL(既定: {DEFAULT_URL})")
     args = ap.parse_args()
+    base_url = args.url.rstrip("/")
 
     rows = read_rows(args.csv, args.sheet)
     if not rows:
         raise SystemExit("ファイルにチケットがありません")
 
-    rm = Redmine(args.url, load_api_key())
+    rm = Redmine(base_url, load_api_key())
     try:
         resolver = Resolver(rm, args.project)
     except RedmineError as e:
+        if e.status == 404:
+            raise SystemExit(
+                f"プロジェクト「{args.project}」が {base_url} に見つかりません。\n"
+                "プロジェクトの識別子(URL の /projects/〇〇 の〇〇)と、接続先(--url)を確認してください。"
+            )
+        if e.status in (401, 403):
+            raise SystemExit(
+                f"{base_url} に接続を断られました(HTTP {e.status})。\n"
+                "APIキーが正しいか、「管理 → 設定 → API」で REST が有効になっているか、"
+                "そのプロジェクトを見る権限があるかを確認してください。"
+            )
         raise SystemExit(f"Redmine の情報を取得できません: {e}")
 
     plan, errors = build_plan(rows, resolver, rm, use_prefix=not args.no_prefix)
 
+    print(f"接続先    : {base_url}")
     print(f"プロジェクト: {resolver.project_name}({args.project})")
-    print(f"作成予定: {len(plan)}件\n")
+    print(f"作成予定  : {len(plan)}件\n")
     print_plan(plan)
 
     if errors:
@@ -614,10 +634,25 @@ def main():
         print("\n(試し実行のため、作成はしていません。作成するには --apply を付けて実行してください)")
         return
 
+    # 本番実行:上の一覧を確認してもらってから作成する
+    if not args.yes:
+        question = f"\n上の {len(plan)} 件を、{base_url} の「{resolver.project_name}」に作成します。よろしいですか? [y/N]: "
+        try:
+            answer = input(question).strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("作成を中止しました(何も作成していません)。")
+            return
+
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = os.path.splitext(args.csv)[0] + f".result-{stamp}.csv"
+    n = 2
+    while os.path.exists(log_path):  # 同じ秒に実行した結果を上書きしない
+        log_path = os.path.splitext(args.csv)[0] + f".result-{stamp}-{n}.csv"
+        n += 1
     print("\n作成を開始します。")
-    log_rows, ok = apply_plan(plan, rm, args.url.rstrip("/"), log_path)
+    log_rows, ok = apply_plan(plan, rm, base_url, log_path)
     print(f"\n{len(log_rows)}件を作成しました。結果: {log_path}")
     if not ok:
         sys.exit(2)

@@ -18,6 +18,9 @@ Redmine の REST API で新しく作成する。行IDを #453 のように書い
   # 確認を省略して反映する
   python3 redmine_bulk_create.py tickets.xlsx --project my-project --apply --yes
 
+  # 既存のチケット #64 と、その下の階層をすべて書き出す(直して読み込めば更新になる)
+  python3 redmine_bulk_create.py --export 64 --project my-project
+
 APIキー:
   環境変数 REDMINE_API_KEY、または ~/.redmine_api_key ファイルに書いておく。
   (Redmine の「個人設定」→「APIアクセスキー」で確認できる)
@@ -26,6 +29,7 @@ APIキー:
 import argparse
 import csv
 import datetime
+import io
 import json
 import os
 import re
@@ -137,7 +141,7 @@ def read_csv_table(path):
             continue
     else:
         raise SystemExit("CSV の文字コードを判別できません(UTF-8 か Shift_JIS で保存してください)")
-    return list(csv.reader(text.splitlines()))
+    return list(csv.reader(io.StringIO(text)))  # 説明などの、セル内の改行も正しく読む
 
 
 # --- Excel(.xlsx)----------------------------------------------
@@ -318,7 +322,9 @@ class Resolver:
 
         prio = rm.get("/enumerations/issue_priorities.json")["issue_priorities"]
         self.priorities = {p["name"]: p["id"] for p in prio}
-        self.statuses = {s["name"]: s["id"] for s in rm.get("/issue_statuses.json")["issue_statuses"]}
+        status_list = rm.get("/issue_statuses.json")["issue_statuses"]
+        self.statuses = {s["name"]: s["id"] for s in status_list}
+        self.closed_status_ids = {s["id"] for s in status_list if s.get("is_closed")}
         self.versions = {v["name"]: v["id"] for v in rm.get(f"/projects/{project}/versions.json")["versions"]}
 
         me = rm.get("/users/current.json")["user"]
@@ -372,6 +378,11 @@ class Resolver:
 
 # 既存のチケットの書き方(行ID・親の欄で共通): #453
 EXISTING_RE = re.compile(r"#(\d+)")
+
+
+def _norm(text):
+    """比べるときだけ、改行コードと前後の空白の違いを無視する(Excel を通すと変わるため)"""
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def _issue_label(issue_id):
@@ -521,6 +532,8 @@ def build_plan(rows, resolver, rm, use_prefix):
         t = val("tracker")
         if t == CLEAR_WORD:
             err(line, "トラッカーは「-」(空にする)にできません")
+        elif t and upd and t == cur["tracker"]["name"]:
+            pass  # 今と同じ(書き出したままの値)
         elif t:
             try:
                 tid = resolver.tracker(t)
@@ -572,7 +585,7 @@ def build_plan(rows, resolver, rm, use_prefix):
             s = ""
         if upd:
             # 更新では、書いたとおりの題名にする(親の題名は付けない)
-            if s and s != cur["subject"]:
+            if s and _norm(s) != _norm(cur["subject"]):
                 f["subject"] = s
                 change("題名", cur["subject"], s)
             full_subject[key] = s or cur["subject"]
@@ -597,6 +610,8 @@ def build_plan(rows, resolver, rm, use_prefix):
                 if cur_assignee:
                     f["assigned_to_id"] = ""
                     change("担当者", cur_assignee.get("name"), "")
+            elif a and a == cur_assignee.get("name"):
+                pass  # 今と同じ(書き出したままの値。今はメンバーでない人でもエラーにしない)
             elif a:
                 try:
                     aid, aname = resolver.assignee(a)
@@ -661,8 +676,8 @@ def build_plan(rows, resolver, rm, use_prefix):
                     f[field] = ""
                     change(label, old.get("name"), "")
                 continue
-            if not v:
-                continue
+            if not v or (upd and v == old.get("name")):
+                continue  # 空欄、または今と同じ(書き出したままの値)
             try:
                 vid = func(v)
             except ValueError as e:
@@ -701,7 +716,7 @@ def build_plan(rows, resolver, rm, use_prefix):
                 if old:
                     f["description"] = ""
                     change("説明", "(あり)", "")
-            elif v and v != old:
+            elif v and _norm(v) != _norm(old):
                 f["description"] = v
                 change("説明", "(あり)" if old else "", f"書き換え({len(v)}文字)")
         else:
@@ -862,6 +877,250 @@ def apply_plan(plan, rm, base_url, log_path):
 
 
 # ============================================================
+# 書き出し(指定したチケットと、その下の階層)
+# ============================================================
+
+EXPORT_HEADERS = ["行ID", "親", "トラッカー", "題名", "担当者", "開始日", "期日", "優先度",
+                  "ステータス", "対象バージョン", "カテゴリ", "予定工数", "説明"]
+EXPORT_WIDTHS = [9, 9, 12, 48, 16, 12, 12, 9, 11, 16, 12, 9, 50]
+EXPORT_DATE_COLS = {"開始日", "期日"}
+
+
+def collect_tree(rm, root_ids):
+    """指定したチケットと、その下のすべてのチケットを、親子の順(親のすぐ後に子)に集める"""
+    ordered, seen = [], set()
+
+    def walk(issue_id, depth):
+        if issue_id in seen:
+            return
+        seen.add(issue_id)
+        try:
+            issue = rm.get(f"/issues/{issue_id}.json?include=children")["issue"]
+        except RedmineError as e:
+            if e.status == 404:
+                raise SystemExit(f"チケット #{issue_id} が見つかりません(番号が違うか、見る権限がありません)")
+            raise SystemExit(f"チケット #{issue_id} を取得できません: {e}")
+        children = [c["id"] for c in issue.pop("children", []) or []]
+        ordered.append((issue, depth))
+        for child_id in children:
+            walk(child_id, depth + 1)
+
+    for root in root_ids:
+        walk(root, 0)
+    return ordered
+
+
+def export_rows(tree, resolver, include_closed=True):
+    """チケットを、読み込みと同じ書式の行にする。戻り値: (行, 字下げの深さ, 除外した件数の説明)"""
+    def name(issue, key):
+        return (issue.get(key) or {}).get("name", "")
+
+    rows, depths, skipped = [], [], []
+    for issue, depth in tree:
+        if issue["project"]["id"] != resolver.project_id:
+            skipped.append(f'#{issue["id"]}(別のプロジェクト「{issue["project"]["name"]}」)')
+            continue
+        if not include_closed and (issue.get("status") or {}).get("id") in resolver.closed_status_ids:
+            skipped.append(f'#{issue["id"]}(終了)')
+            continue
+        parent = (issue.get("parent") or {}).get("id")
+        hours = issue.get("estimated_hours")
+        rows.append({
+            "行ID": f'#{issue["id"]}',
+            "親": f"#{parent}" if parent else "",
+            "トラッカー": name(issue, "tracker"),
+            "題名": issue.get("subject", ""),
+            "担当者": name(issue, "assigned_to"),
+            "開始日": issue.get("start_date") or "",
+            "期日": issue.get("due_date") or "",
+            "優先度": name(issue, "priority"),
+            "ステータス": name(issue, "status"),
+            "対象バージョン": name(issue, "fixed_version"),
+            "カテゴリ": name(issue, "category"),
+            "予定工数": "" if hours is None else (int(hours) if float(hours).is_integer() else hours),
+            "説明": (issue.get("description") or "").replace("\r\n", "\n"),
+        })
+        depths.append(depth)
+    return rows, depths, skipped
+
+
+def _xml_escape(text):
+    text = str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    # Excel が受け付けない制御文字を取り除く(改行とタブは残す)
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+
+
+def _col_letter(n):
+    s = ""
+    n += 1
+    while n:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def write_xlsx(path, headers, rows, widths, depths, date_cols):
+    """
+    標準ライブラリだけで .xlsx を書く(読み込みテンプレートと同じ「チケット」シート)。
+    題名の列は、親子の深さに応じてセルの字下げを付ける(値そのものは変えない)。
+    """
+    import zipfile
+
+    max_indent = 6
+    # スタイル: 0=標準 1=見出し 2=日付 3=折り返し(説明) 4〜=題名の字下げ(深さ 0〜max_indent)
+    indent_xfs = "".join(
+        f'<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">'
+        f'<alignment horizontal="left" indent="{d}" vertical="top"/></xf>' for d in range(max_indent + 1))
+    styles = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts>'
+        '<fonts count="2"><font><sz val="10"/><name val="Meiryo UI"/></font>'
+        '<font><b/><sz val="10"/><color rgb="FFFFFFFF"/><name val="Meiryo UI"/></font></fonts>'
+        '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FF1F4E79"/></patternFill></fill></fills>'
+        '<borders count="2"><border/><border><left style="thin"><color rgb="FFC9D1DC"/></left>'
+        '<right style="thin"><color rgb="FFC9D1DC"/></right><top style="thin"><color rgb="FFC9D1DC"/></top>'
+        '<bottom style="thin"><color rgb="FFC9D1DC"/></bottom></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        f'<cellXfs count="{4 + max_indent + 1}">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>'
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
+        '<alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1">'
+        '<alignment horizontal="center" vertical="top"/></xf>'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">'
+        '<alignment wrapText="1" vertical="top"/></xf>'
+        f'{indent_xfs}</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
+
+    epoch = datetime.date(1899, 12, 30)
+
+    def cell(ref, value, style):
+        if value in ("", None):
+            return f'<c r="{ref}" s="{style}"/>'
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f'<c r="{ref}" s="{style}"><v>{value}</v></c>'
+        return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{_xml_escape(value)}</t></is></c>'
+
+    sheet_rows = []
+    head = "".join(cell(f"{_col_letter(i)}1", h, 1) for i, h in enumerate(headers))
+    sheet_rows.append(f'<row r="1" ht="22" customHeight="1">{head}</row>')
+    for r, (row, depth) in enumerate(zip(rows, depths), start=2):
+        cells = []
+        for i, h in enumerate(headers):
+            v, style = row.get(h, ""), 0
+            if h in date_cols and v:
+                y, m, d = map(int, v.split("-"))
+                v, style = (datetime.date(y, m, d) - epoch).days, 2
+            elif h == "題名":
+                style = 4 + min(depth, max_indent)
+            elif h == "説明":
+                style = 3
+            cells.append(cell(f"{_col_letter(i)}{r}", v, style))
+        sheet_rows.append(f'<row r="{r}">{"".join(cells)}</row>')
+
+    cols = "".join(f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"/>' for i, w in enumerate(widths))
+    last = f"{_col_letter(len(headers) - 1)}{len(rows) + 1}"
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+        '</sheetView></sheetViews>'
+        f'<cols>{cols}</cols><sheetData>{"".join(sheet_rows)}</sheetData>'
+        f'<autoFilter ref="A1:{last}"/></worksheet>')
+
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets><sheet name="{DEFAULT_SHEET}" sheetId="1" r:id="rId1"/></sheets>'
+        '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'
+        f"'{DEFAULT_SHEET}'!$A$1:${_col_letter(len(headers) - 1)}${len(rows) + 1}</definedName></definedNames>"
+        '</workbook>')
+    files = {
+        "[Content_Types].xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            '</Types>',
+        "_rels/.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '</Relationships>',
+        "xl/workbook.xml": workbook,
+        "xl/_rels/workbook.xml.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            '</Relationships>',
+        "xl/styles.xml": styles,
+        "xl/worksheets/sheet1.xml": sheet,
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+
+
+def write_export_csv(path, headers, rows):
+    with open(path, "w", encoding="utf-8-sig", newline="") as fp:
+        w = csv.writer(fp)
+        w.writerow(headers)
+        for row in rows:
+            w.writerow([row.get(h, "") for h in headers])
+
+
+def parse_issue_ids(text):
+    """「64」「#64」「64,380」などを、チケット番号のリストにする"""
+    ids = []
+    for part in re.split(r"[,\s]+", text.strip()):
+        if not part:
+            continue
+        m = re.fullmatch(r"#?(\d+)", part)
+        if not m:
+            raise SystemExit(f"--export のチケット番号が不正です: {part}(例: --export 64 / --export 64,380)")
+        ids.append(int(m.group(1)))
+    if not ids:
+        raise SystemExit("--export にチケット番号を指定してください(例: --export 64)")
+    return ids
+
+
+def run_export(args, rm, resolver):
+    root_ids = parse_issue_ids(args.export)
+    out = args.out or f'export-{"_".join(map(str, root_ids))}-{datetime.date.today():%Y%m%d}.xlsx'
+    if os.path.exists(out):
+        raise SystemExit(f"{out} はすでにあります。上書きしないように止めました(--out で別の名前を指定してください)")
+
+    tree = collect_tree(rm, root_ids)
+    rows, depths, skipped = export_rows(tree, resolver, include_closed=not args.exclude_closed)
+    if not rows:
+        raise SystemExit("書き出すチケットがありません" + (f"(除外: {'、'.join(skipped)})" if skipped else ""))
+
+    if out.lower().endswith(".csv"):
+        write_export_csv(out, EXPORT_HEADERS, rows)
+    else:
+        write_xlsx(out, EXPORT_HEADERS, rows, EXPORT_WIDTHS, depths, EXPORT_DATE_COLS)
+
+    print(f"接続先    : {args.url.rstrip('/')}")
+    print(f"プロジェクト: {resolver.project_name}({args.project})")
+    print(f"書き出し  : {len(rows)}件 → {out}\n")
+    for row, depth in zip(rows, depths):
+        print(f'{"    " * depth}[{row["行ID"]}] {row["トラッカー"]}  {row["題名"]}  ({row["ステータス"]})')
+    if skipped:
+        print(f"\n書き出さなかったチケット: {'、'.join(skipped)}")
+    extra = f" --url {args.url.rstrip('/')}" if args.url.rstrip("/") != DEFAULT_URL.rstrip("/") else ""
+    print("\n直したら、次のように試し実行してから反映してください(変えた項目だけが更新されます):")
+    print(f"  python3 {os.path.basename(sys.argv[0])} {out} --project {args.project}{extra}")
+    print(f"  python3 {os.path.basename(sys.argv[0])} {out} --project {args.project}{extra} --apply")
+
+
+# ============================================================
 # メイン
 # ============================================================
 
@@ -883,20 +1142,35 @@ def load_api_key():
 
 def main():
     ap = argparse.ArgumentParser(description="CSV / Excel から Redmine のチケットを親子付きで一括作成・更新する")
-    ap.add_argument("csv", metavar="ファイル", help="チケットを書いた CSV または Excel(.xlsx)ファイル")
+    ap.add_argument("csv", metavar="ファイル", nargs="?",
+                    help="チケットを書いた CSV または Excel(.xlsx)ファイル(--export のときは不要)")
     ap.add_argument("--project", "-p", required=True, help="プロジェクトの識別子(例: my-project)")
     ap.add_argument("--sheet", help=f"Excel のシート名(既定: 「{DEFAULT_SHEET}」シート、なければ先頭のシート)")
     ap.add_argument("--apply", action="store_true",
                     help="実際に反映する(予定を表示し、確認してから作成・更新する。付けなければ試し実行)")
-    ap.add_argument("--yes", "-y", action="store_true", help="--apply のとき、作成前の確認を省略する")
+    ap.add_argument("--yes", "-y", action="store_true", help="--apply のとき、反映前の確認を省略する")
+    ap.add_argument("--export", metavar="番号",
+                    help="指定したチケットと、その下の階層をすべて書き出す(例: --export 64 / --export 64,380)")
+    ap.add_argument("--out", metavar="ファイル",
+                    help="書き出し先(.xlsx または .csv。既定: export-番号-日付.xlsx)")
+    ap.add_argument("--exclude-closed", action="store_true", help="書き出すときに、終了したチケットを除く")
     ap.add_argument("--no-prefix", action="store_true", help="題名の頭に親の題名を付けない")
     ap.add_argument("--url", default=DEFAULT_URL, help=f"Redmine の URL(既定: {DEFAULT_URL})")
     args = ap.parse_args()
     base_url = args.url.rstrip("/")
 
-    rows = read_rows(args.csv, args.sheet)
-    if not rows:
-        raise SystemExit("ファイルにチケットがありません")
+    if args.export and args.csv:
+        raise SystemExit("--export のときは、読み込むファイルを指定しないでください(書き出し先は --out で指定します)")
+    if not args.export and not args.csv:
+        ap.error("読み込むファイルを指定してください(書き出すときは --export 番号)")
+    if args.export and (args.apply or args.yes):
+        raise SystemExit("--export と --apply は同時に使えません(書き出したファイルを直してから、--apply で反映します)")
+
+    rows = []
+    if not args.export:
+        rows = read_rows(args.csv, args.sheet)
+        if not rows:
+            raise SystemExit("ファイルにチケットがありません")
 
     rm = Redmine(base_url, load_api_key())
     try:
@@ -914,6 +1188,10 @@ def main():
                 "そのプロジェクトを見る権限があるかを確認してください。"
             )
         raise SystemExit(f"Redmine の情報を取得できません: {e}")
+
+    if args.export:
+        run_export(args, rm, resolver)
+        return
 
     plan, errors = build_plan(rows, resolver, rm, use_prefix=not args.no_prefix)
 

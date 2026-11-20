@@ -5,6 +5,7 @@ Redmine を便利に使うための小さな道具をまとめたリポジトリ
 | フォルダ | 内容 |
 |---|---|
 | [bulk-create](bulk-create/) | CSV / Excel から、親子孫の階層つきでチケットを一括作成するツール(Python 3、REST API 使用) |
+| [view-customize](view-customize/) | View customize プラグインに登録して使う画面の改良(external-link-button.js:編集ツールバーに外部リンクのボタン) |
 
 各ツールの使い方は、それぞれのフォルダの README.md を参照してください。
 

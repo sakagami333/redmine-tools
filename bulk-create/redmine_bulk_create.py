@@ -51,6 +51,9 @@ DESCRIPTION_TEMPLATES = {
     "タスク": "# このタスクのゴール\n\n\n\n# 対応内容まとめ\n\n\n\n",
 }
 
+# 実行の記録(結果のCSV)を保存するフォルダ名(入力ファイルと同じ場所に作る)
+RESULT_DIR = "results"
+
 # 値を「空にする」ときに書く記号(更新で期日や担当者を消すときなど)
 CLEAR_WORD = "-"
 
@@ -1160,6 +1163,8 @@ def main():
                     help="書き出し先(.xlsx または .csv。既定: export-番号-日付.xlsx)")
     ap.add_argument("--exclude-closed", action="store_true", help="書き出すときに、終了したチケットを除く")
     ap.add_argument("--no-prefix", action="store_true", help="題名の頭に親の題名を付けない")
+    ap.add_argument("--log-dir", metavar="フォルダ",
+                    help=f"実行の記録(結果のCSV)を保存するフォルダ(既定: 入力ファイルと同じ場所の {RESULT_DIR}/)")
     ap.add_argument("--url", default=DEFAULT_URL, help=f"Redmine の URL(既定: {DEFAULT_URL})")
     args = ap.parse_args()
     base_url = args.url.rstrip("/")
@@ -1239,17 +1244,24 @@ def main():
             print("中止しました(何も反映していません)。")
             return
 
+    # 実行の記録は、入力ファイルと同じ場所の results/ に残す(--log-dir で変更可)
+    log_dir = args.log_dir or os.path.join(os.path.dirname(os.path.abspath(args.csv)), RESULT_DIR)
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except OSError as e:
+        raise SystemExit(f"記録用のフォルダ「{log_dir}」を作れません: {e}(何も反映していません)")
+    stem = os.path.splitext(os.path.basename(args.csv))[0]
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = os.path.splitext(args.csv)[0] + f".result-{stamp}.csv"
+    log_path = os.path.join(log_dir, f"{stem}-{stamp}.csv")
     n = 2
     while os.path.exists(log_path):  # 同じ秒に実行した結果を上書きしない
-        log_path = os.path.splitext(args.csv)[0] + f".result-{stamp}-{n}.csv"
+        log_path = os.path.join(log_dir, f"{stem}-{stamp}-{n}.csv")
         n += 1
     print("\n反映を開始します。")
     log_rows, ok, warn_count = apply_plan(plan, rm, base_url, log_path)
     done_create = sum(1 for r in log_rows if r[1] == "作成")
     done_update = sum(1 for r in log_rows if r[1] == "更新")
-    print(f"\n新規作成 {done_create}件、更新 {done_update}件を反映しました。結果: {log_path}")
+    print(f"\n新規作成 {done_create}件、更新 {done_update}件を反映しました。結果: {os.path.relpath(log_path)}")
     if warn_count:
         print(f"!! {warn_count}件で、指定どおりに変わらなかった項目があります。上の「!!」の行を確認してください。")
     if not ok:
